@@ -1601,6 +1601,8 @@ void PhaseMacroExpand::expand_allocate_common(
     _igvn.replace_node(_resproj, result_phi_rawoop);
   }
 
+  // Node *slow_rawmem = make_store(ctrl, _memproj_fallthrough, slow_result, oopDesc::tag_offset_in_bytes(), longcon(0xbeef), T_LONG);
+
   // Plug slow-path into result merge point
   result_region    ->init_req( slow_result_path, ctrl );
   result_phi_rawoop->init_req( slow_result_path, slow_result);
@@ -1632,6 +1634,7 @@ PhaseMacroExpand::initialize_object(AllocateNode* alloc,
   rawmem = make_store(control, rawmem, object, oopDesc::mark_offset_in_bytes(), mark_node, T_ADDRESS);
 
   rawmem = make_store(control, rawmem, object, oopDesc::klass_offset_in_bytes(), klass_node, T_METADATA);
+  rawmem = make_store(control, rawmem, object, oopDesc::tag_offset_in_bytes(), longcon(0), T_LONG);
   int header_size = alloc->minimum_header_size();  // conservatively small
 
   // Array length

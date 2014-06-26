@@ -1440,7 +1440,7 @@ void Arguments::set_use_compressed_oops() {
   if (max_heap_size <= max_heap_for_compressed_oops()) {
 #if !defined(COMPILER1) || defined(TIERED)
     if (FLAG_IS_DEFAULT(UseCompressedOops)) {
-      FLAG_SET_ERGO(bool, UseCompressedOops, true);
+      // FLAG_SET_ERGO(bool, UseCompressedOops, true);
     }
 #endif
 #ifdef _WIN64

@@ -64,6 +64,7 @@ class oopDesc {
     Klass*      _klass;
     narrowKlass _compressed_klass;
   } _metadata;
+  volatile jlong _tag;
 
   // Fast access to barrier set.  Must be initialized.
   static BarrierSet* _bs;
@@ -372,6 +373,7 @@ class oopDesc {
   // for code generation
   static int mark_offset_in_bytes()    { return offset_of(oopDesc, _mark); }
   static int klass_offset_in_bytes()   { return offset_of(oopDesc, _metadata._klass); }
+  static int tag_offset_in_bytes()     { return offset_of(oopDesc, _tag); }
   static int klass_gap_offset_in_bytes();
 };
 

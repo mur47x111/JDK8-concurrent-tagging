@@ -4489,6 +4489,7 @@ Register MacroAssembler::tlab_refill(Label& retry,
   // store klass last.  concurrent gcs assumes klass length is valid if
   // klass field is not null.
   store_klass(top, t1);
+  movptr(Address(top, oopDesc::tag_offset_in_bytes()), 0);
 
   movptr(t1, top);
   subptr(t1, Address(thread_reg, in_bytes(JavaThread::tlab_start_offset())));

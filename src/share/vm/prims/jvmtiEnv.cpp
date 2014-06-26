@@ -1666,6 +1666,7 @@ jvmtiError
 JvmtiEnv::GetTag(jobject object, jlong* tag_ptr) {
   oop o = JNIHandles::resolve_external_guard(object);
   NULL_CHECK(o, JVMTI_ERROR_INVALID_OBJECT);
+//  *tag_ptr = *(((jlong *) o) + 2);
   *tag_ptr = JvmtiTagMap::tag_map_for(this)->get_tag(object);
   return JVMTI_ERROR_NONE;
 } /* end GetTag */
@@ -1675,6 +1676,7 @@ jvmtiError
 JvmtiEnv::SetTag(jobject object, jlong tag) {
   oop o = JNIHandles::resolve_external_guard(object);
   NULL_CHECK(o, JVMTI_ERROR_INVALID_OBJECT);
+//  *(((jlong *) o) + 2) = tag;
   JvmtiTagMap::tag_map_for(this)->set_tag(object, tag);
   return JVMTI_ERROR_NONE;
 } /* end SetTag */

@@ -176,6 +176,7 @@ void C1_MacroAssembler::initialize_header(Register obj, Register klass, Register
     store_klass_gap(obj, t1);
   }
 #endif
+  movptr(Address(obj, oopDesc::tag_offset_in_bytes()), 0);
 }
 
 

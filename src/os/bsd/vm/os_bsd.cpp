@@ -1161,11 +1161,11 @@ pid_t os::Bsd::gettid() {
   guarantee(retval != 0, "just checking");
   return retval;
 
-#elif __FreeBSD__
+#elif defined(__FreeBSD__)
   retval = syscall(SYS_thr_self);
-#elif __OpenBSD__
+#elif defined(__OpenBSD__)
   retval = syscall(SYS_getthrid);
-#elif __NetBSD__
+#elif defined(__NetBSD__)
   retval = (pid_t) syscall(SYS__lwp_self);
 #endif
 

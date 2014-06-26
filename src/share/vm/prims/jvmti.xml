@@ -4847,6 +4847,46 @@ class C2 extends C1 implements I2 {
       <errors>
       </errors>
     </function>
+    
+    <function id="CompareAndSwapTag" phase="start" num="105">
+      <synopsis>Test And Set Tag</synopsis>
+      <description>
+        TO DO
+      </description>
+      <origin>new</origin>
+      <capabilities>
+        <required id="can_tag_objects"></required>
+      </capabilities>
+      <parameters>
+        <param id="object">
+	      <jobject/>
+	      <description>
+	        The object whose tag is to be set.
+	      </description>
+	    </param>
+        <param id="tag">
+	      <jlong/>
+	      <description>
+	        The new value of the tag.
+	      </description>
+	    </param>
+        <param id="compare">
+	      <jlong/>
+	      <description>
+	        The old value of the tag.
+	      </description>
+	    </param>
+        <param id="tag_ptr">
+	      <outptr><jlong/></outptr>
+	      <description>
+	        On return, the referenced long is set to the value 
+	        of the tag.
+	      </description>
+	    </param>
+      </parameters>
+      <errors>
+      </errors>
+    </function>
 
     <function id="GetObjectsWithTags" num="114">
       <synopsis>Get Objects With Tags</synopsis>

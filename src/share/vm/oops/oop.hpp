@@ -75,6 +75,9 @@ class oopDesc {
 
   void set_mark(volatile markOop m)      { _mark = m;   }
 
+  void set_tag(volatile jlong tag)       { _tag = tag; }
+  jlong get_tag()       		 { return _tag; }
+
   void    release_set_mark(markOop m);
   markOop cas_set_mark(markOop new_mark, markOop old_mark);
 

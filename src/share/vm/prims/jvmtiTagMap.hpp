@@ -34,47 +34,45 @@
 #include "memory/genCollectedHeap.hpp"
 #include "memory/universe.hpp"
 
-// forward references
-class JvmtiTagHashmap;
-class JvmtiTagHashmapEntry;
-class JvmtiTagHashmapEntryClosure;
+#include <tbb/concurrent_hash_map.h>
+
+// InternalTagHashmap
+typedef tbb::concurrent_hash_map<oop, jlong> InternalTagHashmap;
+typedef InternalTagHashmap::accessor InternalTagHashmapEntryWrite;
+typedef InternalTagHashmap::const_accessor InternalTagHashmapEntryRead;
+
+// InternalTagHashmapEntryClosure
+class InternalTagHashmapEntryClosure {
+ public:
+  virtual void do_entry (InternalTagHashmap::iterator &entry) = 0;
+};
+
 
 class JvmtiTagMap :  public CHeapObj<mtInternal> {
  private:
 
-  enum{
-    max_free_entries = 4096         // maximum number of free entries per env
-  };
 
   JvmtiEnv*             _env;                       // the jvmti environment
-  Mutex                 _lock;                      // lock for this tag map
-  JvmtiTagHashmap*      _hashmap;                   // the hashmap
 
-  JvmtiTagHashmapEntry* _free_entries;              // free list for this environment
-  int _free_entries_count;                          // number of entries on the free list
+  InternalTagHashmap*   _hashmap;                   // the hashmap
 
   // create a tag map
   JvmtiTagMap(JvmtiEnv* env);
 
   // accessors
-  inline Mutex* lock()                      { return &_lock; }
   inline JvmtiEnv* env() const              { return _env; }
 
   void do_weak_oops(BoolObjectClosure* is_alive, OopClosure* f);
 
   // iterate over all entries in this tag map
-  void entry_iterate(JvmtiTagHashmapEntryClosure* closure);
+  void entry_iterate(InternalTagHashmapEntryClosure* closure);
 
  public:
 
   // indicates if this tag map is locked
-  bool is_locked()                          { return lock()->is_locked(); }
+  bool is_locked()                          { return false; }
 
-  JvmtiTagHashmap* hashmap() { return _hashmap; }
-
-  // create/destroy entries
-  JvmtiTagHashmapEntry* create_entry(oop ref, jlong tag);
-  void destroy_entry(JvmtiTagHashmapEntry* entry);
+  InternalTagHashmap* hashmap() { return _hashmap; }
 
   // returns true if the hashmaps are empty
   bool is_empty();
@@ -86,6 +84,7 @@ class JvmtiTagMap :  public CHeapObj<mtInternal> {
   ~JvmtiTagMap();
 
   // set/get tag
+  jlong compare_and_swap_tag(oop o, jlong tag, jlong compare);
   void set_tag(jobject obj, jlong tag);
   jlong get_tag(jobject obj);
 

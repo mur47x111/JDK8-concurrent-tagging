@@ -32,8 +32,7 @@
 							<tool id="cdt.managedbuild.tool.gnu.archiver.macosx.base.1297725936" name="GCC Archiver" superClass="cdt.managedbuild.tool.gnu.archiver.macosx.base"/>
 							<tool id="cdt.managedbuild.tool.gnu.cpp.compiler.macosx.base.934564927" name="GCC C++ Compiler" superClass="cdt.managedbuild.tool.gnu.cpp.compiler.macosx.base">
 								<option id="gnu.cpp.compiler.option.include.paths.2104916022" name="Include paths (-I)" superClass="gnu.cpp.compiler.option.include.paths" valueType="includePath">
-									<listOptionValue builtIn="false" value="/Users/zhengy/Documents/cworkspace/jdk8u/build/macosx-x86_64-normal-server-release/hotspot/bsd_amd64_compiler2/generated"/>
-									<listOptionValue builtIn="false" value="/Users/zhengy/Tools/tbb42/include"/>
+									<listOptionValue builtIn="false" value="/Users/zhengy/Documents/workspace-8/jdk8u/build/macosx-x86_64-normal-server-release/hotspot/bsd_amd64_compiler2/generated"/>
 								</option>
 								<option id="gnu.cpp.compiler.option.preprocessor.def.785147748" name="Defined symbols (-D)" superClass="gnu.cpp.compiler.option.preprocessor.def" valueType="definedSymbols">
 									<listOptionValue builtIn="false" value="TARGET_COMPILER_gcc"/>

@@ -50,386 +50,19 @@
 #include "gc_implementation/parallelScavenge/parallelScavengeHeap.hpp"
 #endif // INCLUDE_ALL_GCS
 
-// JvmtiTagHashmapEntry
-//
-// Each entry encapsulates a reference to the tagged object
-// and the tag value. In addition an entry includes a next pointer which
-// is used to chain entries together.
-
-class JvmtiTagHashmapEntry : public CHeapObj<mtInternal> {
- private:
-  friend class JvmtiTagMap;
-
-  oop _object;                          // tagged object
-  jlong _tag;                           // the tag
-  JvmtiTagHashmapEntry* _next;          // next on the list
-
-  inline void init(oop object, jlong tag) {
-    _object = object;
-    _tag = tag;
-    _next = NULL;
-  }
-
-  // constructor
-  JvmtiTagHashmapEntry(oop object, jlong tag)         { init(object, tag); }
-
- public:
-
-  // accessor methods
-  inline oop object() const                           { return _object; }
-  inline oop* object_addr()                           { return &_object; }
-  inline jlong tag() const                            { return _tag; }
-
-  inline void set_tag(jlong tag) {
-    assert(tag != 0, "can't be zero");
-    _tag = tag;
-  }
-
-  inline JvmtiTagHashmapEntry* next() const             { return _next; }
-  inline void set_next(JvmtiTagHashmapEntry* next)      { _next = next; }
-};
-
-
-// JvmtiTagHashmap
-//
-// A hashmap is essentially a table of pointers to entries. Entries
-// are hashed to a location, or position in the table, and then
-// chained from that location. The "key" for hashing is address of
-// the object, or oop. The "value" is the tag value.
-//
-// A hashmap maintains a count of the number entries in the hashmap
-// and resizes if the number of entries exceeds a given threshold.
-// The threshold is specified as a percentage of the size - for
-// example a threshold of 0.75 will trigger the hashmap to resize
-// if the number of entries is >75% of table size.
-//
-// A hashmap provides functions for adding, removing, and finding
-// entries. It also provides a function to iterate over all entries
-// in the hashmap.
-
-class JvmtiTagHashmap : public CHeapObj<mtInternal> {
- private:
-  friend class JvmtiTagMap;
-
-  enum {
-    small_trace_threshold  = 10000,                  // threshold for tracing
-    medium_trace_threshold = 100000,
-    large_trace_threshold  = 1000000,
-    initial_trace_threshold = small_trace_threshold
-  };
-
-  static int _sizes[];                  // array of possible hashmap sizes
-  int _size;                            // actual size of the table
-  int _size_index;                      // index into size table
-
-  int _entry_count;                     // number of entries in the hashmap
-
-  float _load_factor;                   // load factor as a % of the size
-  int _resize_threshold;                // computed threshold to trigger resizing.
-  bool _resizing_enabled;               // indicates if hashmap can resize
-
-  int _trace_threshold;                 // threshold for trace messages
-
-  JvmtiTagHashmapEntry** _table;        // the table of entries.
-
-  // private accessors
-  int resize_threshold() const                  { return _resize_threshold; }
-  int trace_threshold() const                   { return _trace_threshold; }
-
-  // initialize the hashmap
-  void init(int size_index=0, float load_factor=4.0f) {
-    int initial_size =  _sizes[size_index];
-    _size_index = size_index;
-    _size = initial_size;
-    _entry_count = 0;
-    if (TraceJVMTIObjectTagging) {
-      _trace_threshold = initial_trace_threshold;
-    } else {
-      _trace_threshold = -1;
-    }
-    _load_factor = load_factor;
-    _resize_threshold = (int)(_load_factor * _size);
-    _resizing_enabled = true;
-    size_t s = initial_size * sizeof(JvmtiTagHashmapEntry*);
-    _table = (JvmtiTagHashmapEntry**)os::malloc(s, mtInternal);
-    if (_table == NULL) {
-      vm_exit_out_of_memory(s, OOM_MALLOC_ERROR,
-        "unable to allocate initial hashtable for jvmti object tags");
-    }
-    for (int i=0; i<initial_size; i++) {
-      _table[i] = NULL;
-    }
-  }
-
-  // hash a given key (oop) with the specified size
-  static unsigned int hash(oop key, int size) {
-    // shift right to get better distribution (as these bits will be zero
-    // with aligned addresses)
-    unsigned int addr = (unsigned int)(cast_from_oop<intptr_t>(key));
-#ifdef _LP64
-    return (addr >> 3) % size;
-#else
-    return (addr >> 2) % size;
-#endif
-  }
-
-  // hash a given key (oop)
-  unsigned int hash(oop key) {
-    return hash(key, _size);
-  }
-
-  // resize the hashmap - allocates a large table and re-hashes
-  // all entries into the new table.
-  void resize() {
-    int new_size_index = _size_index+1;
-    int new_size = _sizes[new_size_index];
-    if (new_size < 0) {
-      // hashmap already at maximum capacity
-      return;
-    }
-
-    // allocate new table
-    size_t s = new_size * sizeof(JvmtiTagHashmapEntry*);
-    JvmtiTagHashmapEntry** new_table = (JvmtiTagHashmapEntry**)os::malloc(s, mtInternal);
-    if (new_table == NULL) {
-      warning("unable to allocate larger hashtable for jvmti object tags");
-      set_resizing_enabled(false);
-      return;
-    }
-
-    // initialize new table
-    int i;
-    for (i=0; i<new_size; i++) {
-      new_table[i] = NULL;
-    }
-
-    // rehash all entries into the new table
-    for (i=0; i<_size; i++) {
-      JvmtiTagHashmapEntry* entry = _table[i];
-      while (entry != NULL) {
-        JvmtiTagHashmapEntry* next = entry->next();
-        oop key = entry->object();
-        assert(key != NULL, "jni weak reference cleared!!");
-        unsigned int h = hash(key, new_size);
-        JvmtiTagHashmapEntry* anchor = new_table[h];
-        if (anchor == NULL) {
-          new_table[h] = entry;
-          entry->set_next(NULL);
-        } else {
-          entry->set_next(anchor);
-          new_table[h] = entry;
-        }
-        entry = next;
-      }
-    }
-
-    // free old table and update settings.
-    os::free((void*)_table);
-    _table = new_table;
-    _size_index = new_size_index;
-    _size = new_size;
-
-    // compute new resize threshold
-    _resize_threshold = (int)(_load_factor * _size);
-  }
-
-
-  // internal remove function - remove an entry at a given position in the
-  // table.
-  inline void remove(JvmtiTagHashmapEntry* prev, int pos, JvmtiTagHashmapEntry* entry) {
-    assert(pos >= 0 && pos < _size, "out of range");
-    if (prev == NULL) {
-      _table[pos] = entry->next();
-    } else {
-      prev->set_next(entry->next());
-    }
-    assert(_entry_count > 0, "checking");
-    _entry_count--;
-  }
-
-  // resizing switch
-  bool is_resizing_enabled() const          { return _resizing_enabled; }
-  void set_resizing_enabled(bool enable)    { _resizing_enabled = enable; }
-
-  // debugging
-  void print_memory_usage();
-  void compute_next_trace_threshold();
-
- public:
-
-  // create a JvmtiTagHashmap of a preferred size and optionally a load factor.
-  // The preferred size is rounded down to an actual size.
-  JvmtiTagHashmap(int size, float load_factor=0.0f) {
-    int i=0;
-    while (_sizes[i] < size) {
-      if (_sizes[i] < 0) {
-        assert(i > 0, "sanity check");
-        i--;
-        break;
-      }
-      i++;
-    }
-
-    // if a load factor is specified then use it, otherwise use default
-    if (load_factor > 0.01f) {
-      init(i, load_factor);
-    } else {
-      init(i);
-    }
-  }
-
-  // create a JvmtiTagHashmap with default settings
-  JvmtiTagHashmap() {
-    init();
-  }
-
-  // release table when JvmtiTagHashmap destroyed
-  ~JvmtiTagHashmap() {
-    if (_table != NULL) {
-      os::free((void*)_table);
-      _table = NULL;
-    }
-  }
-
-  // accessors
-  int size() const                              { return _size; }
-  JvmtiTagHashmapEntry** table() const          { return _table; }
-  int entry_count() const                       { return _entry_count; }
-
-  // find an entry in the hashmap, returns NULL if not found.
-  inline JvmtiTagHashmapEntry* find(oop key) {
-    unsigned int h = hash(key);
-    JvmtiTagHashmapEntry* entry = _table[h];
-    while (entry != NULL) {
-      if (entry->object() == key) {
-         return entry;
-      }
-      entry = entry->next();
-    }
-    return NULL;
-  }
-
-
-  // add a new entry to hashmap
-  inline void add(oop key, JvmtiTagHashmapEntry* entry) {
-    assert(key != NULL, "checking");
-    assert(find(key) == NULL, "duplicate detected");
-    unsigned int h = hash(key);
-    JvmtiTagHashmapEntry* anchor = _table[h];
-    if (anchor == NULL) {
-      _table[h] = entry;
-      entry->set_next(NULL);
-    } else {
-      entry->set_next(anchor);
-      _table[h] = entry;
-    }
-
-    _entry_count++;
-    if (trace_threshold() > 0 && entry_count() >= trace_threshold()) {
-      assert(TraceJVMTIObjectTagging, "should only get here when tracing");
-      print_memory_usage();
-      compute_next_trace_threshold();
-    }
-
-    // if the number of entries exceed the threshold then resize
-    if (entry_count() > resize_threshold() && is_resizing_enabled()) {
-      resize();
-    }
-  }
-
-  // remove an entry with the given key.
-  inline JvmtiTagHashmapEntry* remove(oop key) {
-    unsigned int h = hash(key);
-    JvmtiTagHashmapEntry* entry = _table[h];
-    JvmtiTagHashmapEntry* prev = NULL;
-    while (entry != NULL) {
-      if (key == entry->object()) {
-        break;
-      }
-      prev = entry;
-      entry = entry->next();
-    }
-    if (entry != NULL) {
-      remove(prev, h, entry);
-    }
-    return entry;
-  }
-
-  // iterate over all entries in the hashmap
-  void entry_iterate(JvmtiTagHashmapEntryClosure* closure);
-};
-
-// possible hashmap sizes - odd primes that roughly double in size.
-// To avoid excessive resizing the odd primes from 4801-76831 and
-// 76831-307261 have been removed. The list must be terminated by -1.
-int JvmtiTagHashmap::_sizes[] =  { 4801, 76831, 307261, 614563, 1228891,
-    2457733, 4915219, 9830479, 19660831, 39321619, 78643219, -1 };
-
-
-// A supporting class for iterating over all entries in Hashmap
-class JvmtiTagHashmapEntryClosure {
- public:
-  virtual void do_entry(JvmtiTagHashmapEntry* entry) = 0;
-};
-
-
-// iterate over all entries in the hashmap
-void JvmtiTagHashmap::entry_iterate(JvmtiTagHashmapEntryClosure* closure) {
-  for (int i=0; i<_size; i++) {
-    JvmtiTagHashmapEntry* entry = _table[i];
-    JvmtiTagHashmapEntry* prev = NULL;
-    while (entry != NULL) {
-      // obtain the next entry before invoking do_entry - this is
-      // necessary because do_entry may remove the entry from the
-      // hashmap.
-      JvmtiTagHashmapEntry* next = entry->next();
-      closure->do_entry(entry);
-      entry = next;
-     }
-  }
-}
-
-// debugging
-void JvmtiTagHashmap::print_memory_usage() {
-  intptr_t p = (intptr_t)this;
-  tty->print("[JvmtiTagHashmap @ " INTPTR_FORMAT, p);
-
-  // table + entries in KB
-  int hashmap_usage = (size()*sizeof(JvmtiTagHashmapEntry*) +
-    entry_count()*sizeof(JvmtiTagHashmapEntry))/K;
-
-  int weak_globals_usage = (int)(JNIHandles::weak_global_handle_memory_usage()/K);
-  tty->print_cr(", %d entries (%d KB) <JNI weak globals: %d KB>]",
-    entry_count(), hashmap_usage, weak_globals_usage);
-}
-
-// compute threshold for the next trace message
-void JvmtiTagHashmap::compute_next_trace_threshold() {
-  if (trace_threshold() < medium_trace_threshold) {
-    _trace_threshold += small_trace_threshold;
-  } else {
-    if (trace_threshold() < large_trace_threshold) {
-      _trace_threshold += medium_trace_threshold;
-    } else {
-      _trace_threshold += large_trace_threshold;
-    }
-  }
-}
+#include <list>
 
 // create a JvmtiTagMap
 JvmtiTagMap::JvmtiTagMap(JvmtiEnv* env) :
-  _env(env),
-  _lock(Mutex::nonleaf+2, "JvmtiTagMap._lock", false),
-  _free_entries(NULL),
-  _free_entries_count(0)
+  _env(env)
 {
   assert(JvmtiThreadState_lock->is_locked(), "sanity check");
   assert(((JvmtiEnvBase *)env)->tag_map() == NULL, "tag map already exists for environment");
 
-  _hashmap = new JvmtiTagHashmap();
+  _hashmap = new InternalTagHashmap();
 
   // finally add us to the environment
-  ((JvmtiEnvBase *)env)->set_tag_map(this);
+   ((JvmtiEnvBase *)env)->set_tag_map(this);
 }
 
 
@@ -440,59 +73,9 @@ JvmtiTagMap::~JvmtiTagMap() {
   // also being destroryed.
   ((JvmtiEnvBase *)_env)->set_tag_map(NULL);
 
-  JvmtiTagHashmapEntry** table = _hashmap->table();
-  for (int j = 0; j < _hashmap->size(); j++) {
-    JvmtiTagHashmapEntry* entry = table[j];
-    while (entry != NULL) {
-      JvmtiTagHashmapEntry* next = entry->next();
-      delete entry;
-      entry = next;
-    }
-  }
-
   // finally destroy the hashmap
   delete _hashmap;
   _hashmap = NULL;
-
-  // remove any entries on the free list
-  JvmtiTagHashmapEntry* entry = _free_entries;
-  while (entry != NULL) {
-    JvmtiTagHashmapEntry* next = entry->next();
-    delete entry;
-    entry = next;
-  }
-  _free_entries = NULL;
-}
-
-// create a hashmap entry
-// - if there's an entry on the (per-environment) free list then this
-// is returned. Otherwise an new entry is allocated.
-JvmtiTagHashmapEntry* JvmtiTagMap::create_entry(oop ref, jlong tag) {
-  assert(Thread::current()->is_VM_thread() || is_locked(), "checking");
-  JvmtiTagHashmapEntry* entry;
-  if (_free_entries == NULL) {
-    entry = new JvmtiTagHashmapEntry(ref, tag);
-  } else {
-    assert(_free_entries_count > 0, "mismatched _free_entries_count");
-    _free_entries_count--;
-    entry = _free_entries;
-    _free_entries = entry->next();
-    entry->init(ref, tag);
-  }
-  return entry;
-}
-
-// destroy an entry by returning it to the free list
-void JvmtiTagMap::destroy_entry(JvmtiTagHashmapEntry* entry) {
-  assert(SafepointSynchronize::is_at_safepoint() || is_locked(), "checking");
-  // limit the size of the free list
-  if (_free_entries_count >= max_free_entries) {
-    delete entry;
-  } else {
-    entry->set_next(_free_entries);
-    _free_entries = entry;
-    _free_entries_count++;
-  }
 }
 
 // returns the tag map for the given environments. If the tag map
@@ -511,15 +94,10 @@ JvmtiTagMap* JvmtiTagMap::tag_map_for(JvmtiEnv* env) {
   return tag_map;
 }
 
-// iterate over all entries in the tag map.
-void JvmtiTagMap::entry_iterate(JvmtiTagHashmapEntryClosure* closure) {
-  hashmap()->entry_iterate(closure);
-}
-
 // returns true if the hashmaps are empty
 bool JvmtiTagMap::is_empty() {
   assert(SafepointSynchronize::is_at_safepoint() || is_locked(), "checking");
-  return hashmap()->entry_count() == 0;
+  return _hashmap->empty();
 }
 
 
@@ -527,12 +105,9 @@ bool JvmtiTagMap::is_empty() {
 // not tagged
 //
 static inline jlong tag_for(JvmtiTagMap* tag_map, oop o) {
-  JvmtiTagHashmapEntry* entry = tag_map->hashmap()->find(o);
-  if (entry == NULL) {
-    return 0;
-  } else {
-    return entry->tag();
-  }
+  InternalTagHashmapEntryRead entry;
+  if (tag_map->hashmap()->find(entry, o)) return entry->second;
+                                     else return 0;
 }
 
 
@@ -553,19 +128,20 @@ static inline jlong tag_for(JvmtiTagMap* tag_map, oop o) {
 class CallbackWrapper : public StackObj {
  private:
   JvmtiTagMap* _tag_map;
-  JvmtiTagHashmap* _hashmap;
-  JvmtiTagHashmapEntry* _entry;
   oop _o;
   jlong _obj_size;
   jlong _obj_tag;
+  jlong _old_tag;
   jlong _klass_tag;
 
  protected:
   JvmtiTagMap* tag_map() const      { return _tag_map; }
 
   // invoked post-callback to tag, untag, or update the tag of an object
-  void inline post_callback_tag_update(oop o, JvmtiTagHashmap* hashmap,
-                                       JvmtiTagHashmapEntry* entry, jlong obj_tag);
+  void inline post_callback_tag_update(oop o,
+                                       JvmtiTagMap* tag_map,
+                                       jlong old_tag,
+                                       jlong obj_tag);
  public:
   CallbackWrapper(JvmtiTagMap* tag_map, oop o) {
     assert(Thread::current()->is_VM_thread() || tag_map->is_locked(),
@@ -579,11 +155,9 @@ class CallbackWrapper : public StackObj {
 
     // record the context
     _tag_map = tag_map;
-    _hashmap = tag_map->hashmap();
-    _entry = _hashmap->find(_o);
 
     // get object tag
-    _obj_tag = (_entry == NULL) ? 0 : _entry->tag();
+    _old_tag = _obj_tag = tag_for (_tag_map, _o);
 
     // get the class and the class's tag value
     assert(SystemDictionary::Class_klass()->oop_is_instanceMirror(), "Is not?");
@@ -592,7 +166,7 @@ class CallbackWrapper : public StackObj {
   }
 
   ~CallbackWrapper() {
-    post_callback_tag_update(_o, _hashmap, _entry, _obj_tag);
+    post_callback_tag_update(_o,_tag_map,_old_tag,_obj_tag);
   }
 
   inline jlong* obj_tag_p()                     { return &_obj_tag; }
@@ -605,31 +179,10 @@ class CallbackWrapper : public StackObj {
 
 // callback post-callback to tag, untag, or update the tag of an object
 void inline CallbackWrapper::post_callback_tag_update(oop o,
-                                                      JvmtiTagHashmap* hashmap,
-                                                      JvmtiTagHashmapEntry* entry,
-                                                      jlong obj_tag) {
-  if (entry == NULL) {
-    if (obj_tag != 0) {
-      // callback has tagged the object
-      assert(Thread::current()->is_VM_thread(), "must be VMThread");
-      entry = tag_map()->create_entry(o, obj_tag);
-      hashmap->add(o, entry);
-    }
-  } else {
-    // object was previously tagged - the callback may have untagged
-    // the object or changed the tag value
-    if (obj_tag == 0) {
-
-      JvmtiTagHashmapEntry* entry_removed = hashmap->remove(o);
-      assert(entry_removed == entry, "checking");
-      tag_map()->destroy_entry(entry);
-
-    } else {
-      if (obj_tag != entry->tag()) {
-         entry->set_tag(obj_tag);
-      }
-    }
-  }
+                                                      JvmtiTagMap* tag_map,
+                                                      jlong old_tag,
+                                                      jlong obj_tag){
+  if (old_tag != obj_tag) tag_map->set_tag_internal(o,obj_tag);
 }
 
 // An extended CallbackWrapper used when reporting an object reference
@@ -650,10 +203,10 @@ void inline CallbackWrapper::post_callback_tag_update(oop o,
 class TwoOopCallbackWrapper : public CallbackWrapper {
  private:
   bool _is_reference_to_self;
-  JvmtiTagHashmap* _referrer_hashmap;
-  JvmtiTagHashmapEntry* _referrer_entry;
+  JvmtiTagMap* _referrer_tag_map;
   oop _referrer;
   jlong _referrer_obj_tag;
+  jlong _referrer_old_tag;
   jlong _referrer_klass_tag;
   jlong* _referrer_tag_p;
 
@@ -672,11 +225,10 @@ class TwoOopCallbackWrapper : public CallbackWrapper {
     } else {
       _referrer = referrer;
       // record the context
-      _referrer_hashmap = tag_map->hashmap();
-      _referrer_entry = _referrer_hashmap->find(_referrer);
+      _referrer_tag_map = tag_map;
 
       // get object tag
-      _referrer_obj_tag = (_referrer_entry == NULL) ? 0 : _referrer_entry->tag();
+      _referrer_obj_tag = tag_for(_referrer_tag_map, _referrer);
       _referrer_tag_p = &_referrer_obj_tag;
 
       // get referrer class tag.
@@ -687,8 +239,8 @@ class TwoOopCallbackWrapper : public CallbackWrapper {
   ~TwoOopCallbackWrapper() {
     if (!is_reference_to_self()){
       post_callback_tag_update(_referrer,
-                               _referrer_hashmap,
-                               _referrer_entry,
+                               _referrer_tag_map,
+                               _referrer_old_tag,
                                _referrer_obj_tag);
     }
   }
@@ -701,52 +253,45 @@ class TwoOopCallbackWrapper : public CallbackWrapper {
   inline jlong referrer_klass_tag()     { return _referrer_klass_tag; }
 };
 
+
+void JvmtiTagMap::set_tag_internal(oop o, jlong tag) {
+  // setting tag to 0 means remove tag
+  if (tag) {
+    InternalTagHashmapEntryWrite entry;
+    _hashmap->insert (entry, o);
+    entry->second = tag;
+  } else {
+    _hashmap->erase (o);
+  }
+}
+
 // tag an object
 //
 // This function is performance critical. If many threads attempt to tag objects
 // around the same time then it's possible that the Mutex associated with the
 // tag map will be a hot lock.
 void JvmtiTagMap::set_tag(jobject object, jlong tag) {
-  MutexLocker ml(lock());
-
   // resolve the object
   oop o = JNIHandles::resolve_non_null(object);
 
-  // see if the object is already tagged
-  JvmtiTagHashmap* hashmap = _hashmap;
-  JvmtiTagHashmapEntry* entry = hashmap->find(o);
-
-  // if the object is not already tagged then we tag it
-  if (entry == NULL) {
-    if (tag != 0) {
-      entry = create_entry(o, tag);
-      hashmap->add(o, entry);
-    } else {
-      // no-op
-    }
-  } else {
-    // if the object is already tagged then we either update
-    // the tag (if a new tag value has been provided)
-    // or remove the object if the new tag value is 0.
-    if (tag == 0) {
-      hashmap->remove(o);
-      destroy_entry(entry);
-    } else {
-      entry->set_tag(tag);
-    }
-  }
+  set_tag_internal (o, tag);
 }
 
 // get the tag for an object
 jlong JvmtiTagMap::get_tag(jobject object) {
-  MutexLocker ml(lock());
-
   // resolve the object
   oop o = JNIHandles::resolve_non_null(object);
 
   return tag_for(this, o);
 }
 
+// entry iteration
+// this is where the modification is broken since iteration is not thread safe
+// additional locking would have to be added to guarantee safety and that sucks
+void JvmtiTagMap::entry_iterate(InternalTagHashmapEntryClosure *closure) {
+  for (InternalTagHashmap::iterator i = _hashmap->begin () ; i != _hashmap->end () ; i++)
+    closure->do_entry (i);
+}
 
 // Helper class used to describe the static or instance fields of a class.
 // For each field it holds the field index (as defined by the JVMTI specification),
@@ -1481,7 +1026,7 @@ void JvmtiTagMap::iterate_through_heap(jint heap_filter,
 
 // support class for get_objects_with_tags
 
-class TagObjectCollector : public JvmtiTagHashmapEntryClosure {
+class TagObjectCollector : public InternalTagHashmapEntryClosure {
  private:
   JvmtiEnv* _env;
   jlong* _tags;
@@ -1508,14 +1053,14 @@ class TagObjectCollector : public JvmtiTagHashmapEntryClosure {
   // - if it matches then we create a JNI local reference to the object
   // and record the reference and tag value.
   //
-  void do_entry(JvmtiTagHashmapEntry* entry) {
+  void do_entry(InternalTagHashmap::iterator &entry) {
     for (int i=0; i<_tag_count; i++) {
-      if (_tags[i] == entry->tag()) {
-        oop o = entry->object();
+      if (_tags[i] == entry->second) {
+        oop o = entry->first;
         assert(o != NULL && Universe::heap()->is_in_reserved(o), "sanity check");
         jobject ref = JNIHandles::make_local(JavaThread::current(), o);
         _object_results->append(ref);
-        _tag_results->append((uint64_t)entry->tag());
+        _tag_results->append((uint64_t)entry->second);
       }
     }
   }
@@ -1560,15 +1105,13 @@ class TagObjectCollector : public JvmtiTagHashmapEntryClosure {
 };
 
 // return the list of objects with the specified tags
+// modification breaks this function under concurrency
 jvmtiError JvmtiTagMap::get_objects_with_tags(const jlong* tags,
   jint count, jint* count_ptr, jobject** object_result_ptr, jlong** tag_result_ptr) {
-
   TagObjectCollector collector(env(), tags, count);
-  {
-    // iterate over all tagged objects
-    MutexLocker ml(lock());
-    entry_iterate(&collector);
-  }
+  // iterate over all tagged objects
+  entry_iterate(&collector);
+
   return collector.result(count_ptr, object_result_ptr, tag_result_ptr);
 }
 
@@ -3275,106 +2818,62 @@ void JvmtiTagMap::weak_oops_do(BoolObjectClosure* is_alive, OopClosure* f) {
   }
 }
 
+typedef std::list<std::pair<oop,jlong> > entry_list;
+
 void JvmtiTagMap::do_weak_oops(BoolObjectClosure* is_alive, OopClosure* f) {
 
   // does this environment have the OBJECT_FREE event enabled
   bool post_object_free = env()->is_enabled(JVMTI_EVENT_OBJECT_FREE);
 
-  // counters used for trace message
-  int freed = 0;
-  int moved = 0;
+  entry_list to_free;
+  entry_list to_move_out;
+  entry_list to_move_in;
 
-  JvmtiTagHashmap* hashmap = this->hashmap();
+  // any table access invalidates iterators
+  // we therefore first collect objects to process
+  // afterwards when table access is safe we do the processing
+  for (InternalTagHashmap::iterator i = _hashmap->begin () ; i != _hashmap->end () ; i++) {
+    oop old_oop = i->first;
+    jlong t = i->second;
 
-  // reenable sizing (if disabled)
-  hashmap->set_resizing_enabled(true);
+    // tags of collected objects should be freed
+    if (!is_alive->do_object_b(old_oop)) {
+      to_free.push_front (std::make_pair (old_oop,t));
+    } else {
+      oop new_oop = old_oop;
+      f->do_oop (&new_oop);
 
-  // if the hashmap is empty then we can skip it
-  if (hashmap->_entry_count == 0) {
-    return;
-  }
-
-  // now iterate through each entry in the table
-
-  JvmtiTagHashmapEntry** table = hashmap->table();
-  int size = hashmap->size();
-
-  JvmtiTagHashmapEntry* delayed_add = NULL;
-
-  for (int pos = 0; pos < size; ++pos) {
-    JvmtiTagHashmapEntry* entry = table[pos];
-    JvmtiTagHashmapEntry* prev = NULL;
-
-    while (entry != NULL) {
-      JvmtiTagHashmapEntry* next = entry->next();
-
-      oop* obj = entry->object_addr();
-
-      // has object been GC'ed
-      if (!is_alive->do_object_b(entry->object())) {
-        // grab the tag
-        jlong tag = entry->tag();
-        guarantee(tag != 0, "checking");
-
-        // remove GC'ed entry from hashmap and return the
-        // entry to the free list
-        hashmap->remove(prev, pos, entry);
-        destroy_entry(entry);
-
-        // post the event to the profiler
-        if (post_object_free) {
-          JvmtiExport::post_object_free(env(), tag);
-        }
-
-        ++freed;
-      } else {
-        f->do_oop(entry->object_addr());
-        oop new_oop = entry->object();
-
-        // if the object has moved then re-hash it and move its
-        // entry to its new location.
-        unsigned int new_pos = JvmtiTagHashmap::hash(new_oop, size);
-        if (new_pos != (unsigned int)pos) {
-          if (prev == NULL) {
-            table[pos] = next;
-          } else {
-            prev->set_next(next);
-          }
-          if (new_pos < (unsigned int)pos) {
-            entry->set_next(table[new_pos]);
-            table[new_pos] = entry;
-          } else {
-            // Delay adding this entry to it's new position as we'd end up
-            // hitting it again during this iteration.
-            entry->set_next(delayed_add);
-            delayed_add = entry;
-          }
-          moved++;
-        } else {
-          // object didn't move
-          prev = entry;
-        }
+      // tags of moved objects should be updated
+      if (new_oop != old_oop) {
+	to_move_out.push_front (std::make_pair (old_oop,t));
+	to_move_in.push_front (std::make_pair (new_oop,t));
       }
-
-      entry = next;
     }
   }
 
-  // Re-add all the entries which were kept aside
-  while (delayed_add != NULL) {
-    JvmtiTagHashmapEntry* next = delayed_add->next();
-    unsigned int pos = JvmtiTagHashmap::hash(delayed_add->object(), size);
-    delayed_add->set_next(table[pos]);
-    table[pos] = delayed_add;
-    delayed_add = next;
+  for (entry_list::iterator i = to_free.begin () ; i != to_free.end (); i ++) {
+    _hashmap->erase (i->first);
+
+    // post the event to the profiler
+    if (post_object_free) {
+      JvmtiExport::post_object_free(_env, i->second);
+    }
+  }
+
+  for (entry_list::iterator i = to_move_out.begin () ; i != to_move_out.end () ; i ++) {
+      _hashmap->erase (i->first);
+  }
+
+  for (entry_list::iterator i = to_move_in.begin () ; i != to_move_in.end () ; i ++) {
+      InternalTagHashmapEntryWrite entry;
+      _hashmap->insert (entry, i->first);
+      entry->second = i->second;
   }
 
   // stats
   if (TraceJVMTIObjectTagging) {
-    int post_total = hashmap->_entry_count;
-    int pre_total = post_total + freed;
-
-    tty->print_cr("(%d->%d, %d freed, %d total moves)",
-        pre_total, post_total, freed, moved);
+    int total = _hashmap->size ();
+    tty->print_cr("(total %d, %d freed, %d moved)",
+        total, to_free.size (), to_move_out.size ());
   }
 }

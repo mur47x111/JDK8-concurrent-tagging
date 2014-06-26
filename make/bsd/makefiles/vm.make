@@ -128,7 +128,7 @@ ifneq ($(OS_VENDOR), Darwin)
 LFLAGS += -Xlinker -z -Xlinker noexecstack
 endif
 
-LIBS += -lm
+LIBS += -lm -ltbb
 
 ifeq ($(USE_CLANG),)
   LIBS += -pthread
